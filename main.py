@@ -676,6 +676,8 @@ async def check_payment_status(order_id: int, user: user_dependency, db: db_depe
         logger.error(f"Error checking payment status: {str(e)}")
         raise HTTPException(status_code=500, detail="Error checking payment status")
 
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
