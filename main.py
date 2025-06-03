@@ -251,11 +251,16 @@ async def delete_product(product_id: int, db: db_dependency, user: user_dependen
         logger.error(f"Error deleting product: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# FIXED: Single create_order endpoint with proper transaction handling
 @app.post("/create_order", status_code=status.HTTP_201_CREATED)
 async def create_order(db: db_dependency, user: user_dependency, order_payload: CartPayload):
+    logger.info(f"Starting order creation for user {user.get('id')}")
+    
     try:
+        # Validate address first (outside transaction)
         address_id = order_payload.address_id
         if address_id:
+            logger.info(f"Validating address ID {address_id}")
             stmt = select(models.Address).filter(
                 models.Address.id == address_id,
                 models.Address.user_id == user.get("id")
@@ -263,58 +268,99 @@ async def create_order(db: db_dependency, user: user_dependency, order_payload: 
             result = await db.execute(stmt)
             address = result.scalars().first()
             if not address:
+                logger.info(f"Invalid address ID {address_id}")
                 raise HTTPException(status_code=400, detail="Invalid address ID")
 
+        # Validate all products exist and have sufficient stock (before transaction)
+        product_ids = [item.id for item in order_payload.cart]
+        logger.info(f"Validating products: {product_ids}")
+        
+        stmt = select(models.Products).filter(models.Products.id.in_(product_ids))
+        result = await db.execute(stmt)
+        products = {product.id: product for product in result.scalars().all()}
+        
+        # Check if all products exist and have sufficient stock
+        for item in order_payload.cart:
+            product = products.get(item.id)
+            if not product:
+                logger.info(f"Product ID {item.id} not found")
+                raise HTTPException(status_code=404, detail=f"Product ID {item.id} not found")
+            
+            quantity = Decimal(str(item.quantity))
+            if product.stock_quantity < quantity:
+                logger.info(f"Insufficient stock for product {product.name}")
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for product {product.name}")
+
+        # Now start the transaction
+        logger.info("Starting database transaction")
         delivery_fee = Decimal(str(order_payload.delivery_fee))
+        
+        # Create order
         new_order = models.Orders(
             user_id=user.get("id"),
-            total=0,
+            total=Decimal('0'),
             address_id=address_id,
             delivery_fee=delivery_fee
         )
+        
+        logger.info("Adding new order to session")
         db.add(new_order)
-        await db.commit()
+        await db.flush()  # Get the order ID without committing
         await db.refresh(new_order)
+        logger.info(f"New order created with ID: {new_order.order_id}")
 
+        # Process cart items
         total_cost = Decimal('0')
         for item in order_payload.cart:
-            stmt = select(models.Products).filter_by(id=item.id)
-            result = await db.execute(stmt)
-            product = result.scalars().first()
-            if not product:
-                await db.rollback()
-                raise HTTPException(status_code=404, detail=f"Product ID {item.id} not found")
+            logger.info(f"Processing cart item: product_id={item.id}, quantity={item.quantity}")
+            product = products[item.id]  # We already validated this exists
             quantity = Decimal(str(item.quantity))
-            if product.stock_quantity < quantity:
-                await db.rollback()
-                raise HTTPException(status_code=400, detail=f"Insufficient stock for product {product.name}")
-
+            
+            # Create order detail
+            item_total = product.price * quantity
             order_detail = models.OrderDetails(
                 order_id=new_order.order_id,
                 product_id=product.id,
                 quantity=quantity,
-                total_price=product.price * quantity,
+                total_price=item_total,
             )
-            total_cost += order_detail.total_price
+            
+            # Update product stock
             product.stock_quantity -= quantity
+            logger.info(f"Updated stock for {product.name}: {product.stock_quantity + quantity} -> {product.stock_quantity}")
+            
             db.add(order_detail)
+            total_cost += item_total
 
+        # Update order total
         new_order.total = total_cost + new_order.delivery_fee
-        await db.commit()
+        logger.info(f"Order total: {new_order.total}")
 
-        logger.info(f"Order {new_order.order_id} created for user {user.get('id')}")
+        # Commit the transaction
+        await db.commit()
+        logger.info(f"Order {new_order.order_id} created successfully for user {user.get('id')}")
+
         return {
             "message": "Order created successfully",
             "order_id": new_order.order_id,
         }
-    except SQLAlchemyError as e:
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
         await db.rollback()
-        logger.error(f"Error creating order: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise
     except ValueError as e:
         await db.rollback()
-        logger.error(f"Invalid quantity value: {str(e)}")
+        logger.error(f"ValueError creating order: {str(e)}")
         raise HTTPException(status_code=400, detail="Invalid quantity value")
+    except SQLAlchemyError as e:
+        await db.rollback()
+        logger.error(f"SQLAlchemy error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database error occurred")
+    except Exception as e:
+        await db.rollback()  
+        logger.error(f"Unexpected error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 @app.get("/orders", response_model=PaginatedOrderResponse, status_code=status.HTTP_200_OK)
 async def fetch_orders(
@@ -561,7 +607,6 @@ async def fetch_all_orders(
         logger.error(f"Error fetching all orders: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching orders")
 
-
 @app.put("/update-order-status/{order_id}", status_code=status.HTTP_200_OK)
 async def update_order_status(
     order_id: int,
@@ -612,115 +657,17 @@ async def update_order_status(
         await db.rollback()
         logger.error(f"Unexpected error updating order status for order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error updating order status")
-
-
-@app.post("/create_order", status_code=status.HTTP_201_CREATED)
-async def create_order(db: db_dependency, user: user_dependency, order_payload: CartPayload):
-    logger.info(f"Starting order creation for user {user.get('id')}")
-    try:
-        # Validate address
-        logger.info(f"Validating address ID {order_payload.address_id}")
-        address_id = order_payload.address_id
-        if address_id:
-            stmt = select(models.Address).filter(
-                models.Address.id == address_id,
-                models.Address.user_id == user.get("id")
-            )
-            logger.info("Executing address query")
-            result = await db.execute(stmt)
-            address = result.scalars().first()
-            if not address:
-                logger.info(f"Invalid address ID {address_id}")
-                raise HTTPException(status_code=400, detail="Invalid address ID")
-
-        # Create order
-        logger.info("Creating new order")
-        delivery_fee = Decimal(str(order_payload.delivery_fee))
-        new_order = models.Orders(
-            user_id=user.get("id"),
-            total=Decimal('0'),
-            address_id=address_id,
-            delivery_fee=delivery_fee
-        )
-        logger.info("Adding new order to session")
-        db.add(new_order)
-        logger.info("Committing new order")
-        await db.commit()
-        logger.info("Refreshing new order")
-        await db.refresh(new_order)
-
-        # Process cart items
-        logger.info("Processing cart items")
-        total_cost = Decimal('0')
-        for item in order_payload.cart:
-            logger.info(f"Fetching product ID {item.id}")
-            stmt = select(models.Products).filter_by(id=item.id)
-            logger.info(f"Executing product query for ID {item.id}")
-            result = await db.execute(stmt)
-            logger.info(f"Retrieving product for ID {item.id}")
-            product = result.scalars().first()
-            if not product:
-                logger.info(f"Product ID {item.id} not found")
-                await db.rollback()
-                raise HTTPException(status_code=404, detail=f"Product ID {item.id} not found")
-            
-            logger.info(f"Validating stock for product {product.name}")
-            quantity = Decimal(str(item.quantity))
-            if product.stock_quantity < quantity:
-                logger.info(f"Insufficient stock for product {product.name}")
-                await db.rollback()
-                raise HTTPException(status_code=400, detail=f"Insufficient stock for product {product.name}")
-
-            logger.info(f"Creating order detail for product {product.name}")
-            order_detail = models.OrderDetails(
-                order_id=new_order.order_id,
-                product_id=product.id,
-                quantity=quantity,
-                total_price=product.price * quantity,
-            )
-            logger.info(f"Updating stock quantity for product {product.name}")
-            product.stock_quantity -= quantity
-            logger.info(f"Adding order detail to session")
-            db.add(order_detail)
-
-        logger.info("Updating order total")
-        new_order.total = total_cost + new_order.delivery_fee
-        logger.info("Committing final order")
-        await db.commit()
-
-        logger.info(f"Order {new_order.order_id} created for user {user.get('id')}")
-        return {
-            "message": "Order created successfully",
-            "order_id": new_order.order_id,
-        }
-    except SQLAlchemyError as e:
-        await db.rollback()
-        logger.error(f"SQLAlchemy error creating order: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    except ValueError as e:
-        await db.rollback()
-        logger.error(f"ValueError creating order: {str(e)}")
-        raise HTTPException(status_code=400, detail="Invalid quantity value")
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Unexpected error creating order: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
     
 
 
 @app.post("/initiate_payment", status_code=status.HTTP_200_OK)
-async def initiate_payment(request: InitiatePaymentRequest, user: user_dependency, db: db_dependency):
+async def initiate_payment(
+    request: InitiatePaymentRequest,
+    user: user_dependency,
+    db: db_dependency
+):
     try:
-        # Validate amount early
-        if request.amount != int(request.amount):
-            raise HTTPException(status_code=400, detail="Amount must be a whole number")
-        
-        amount_int = int(request.amount)
-        if amount_int < 1:
-            raise HTTPException(status_code=400, detail="Amount must be at least 1 KES")
-        if amount_int > 70000:
-            raise HTTPException(status_code=400, detail="Amount cannot exceed 70,000 KES")
-
+        # Validate that the order exists and belongs to the user
         result = await db.execute(
             select(models.Orders).filter(
                 models.Orders.order_id == request.order_id,
@@ -728,71 +675,191 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
             )
         )
         order = result.scalars().first()
+        
         if not order:
+            logger.info(f"Order not found: ID {request.order_id} for user {user.get('id')}")
             raise HTTPException(status_code=404, detail="Order not found")
-
-        # Verify amount matches order total
-        if amount_int != int(order.total):
-            raise HTTPException(status_code=400, detail="Amount does not match order total")
-
-        result = await db.execute(
-            select(models.Transaction).filter(models.Transaction.order_id == request.order_id)
-        )
-        existing_transaction = result.scalars().first()
-        if existing_transaction and existing_transaction._status == models.TransactionStatus.ACCEPTED:
-            raise HTTPException(status_code=400, detail="Payment already accepted")
-
-        data = {
-            "Amount": amount_int,  # Use integer directly
-            "PhoneNumber": request.phone_number,
-            "AccountReference": str(request.order_id),
-            "pid": str(uuid.uuid4()),
-            "order_id": request.order_id,
-            "user_id": user.get("id")
-        }
-
+        
+        # Check if order is already paid or cancelled
+        if order.status == models.OrderStatus.DELIVERED:
+            raise HTTPException(status_code=400, detail="Order is already completed")
+        
+        if order.status == models.OrderStatus.CANCELLED:
+            raise HTTPException(status_code=400, detail="Cannot pay for cancelled order")
+        
+        # Validate amount
+        if request.amount != float(order.total):
+            logger.info(f"Amount mismatch for order {request.order_id}: {request.amount} vs {order.total}")
+            raise HTTPException(status_code=400, detail="Invalid payment amount")
+        
+        # Initialize LNMO repository
         lnmo_repo = LNMORepository()
-        response = await lnmo_repo.transact(data, db)
-
-        return {"message": "Payment initiated", "CheckoutRequestID": response.get("CheckoutRequestID")}
+        
+        # Prepare data for transact
+        transact_data = {
+            "Amount": request.amount,
+            "PhoneNumber": request.phone_number,
+            "AccountReference": f"ORDER-{request.order_id}",
+            "order_id": request.order_id,
+            "user_id": user.get("id"),
+            "pid": f"ORDER-{request.order_id}"
+        }
+        
+        # Initiate payment with M-Pesa
+        payment_response = await lnmo_repo.transact(transact_data, db)
+        
+        # Update order with payment reference
+        order.payment_reference = payment_response.get('CheckoutRequestID')
+        await db.commit()
+        
+        logger.info(f"Payment initiated for order {order.order_id} by user {user.get('id')}")
+        
+        return {
+            "CheckoutRequestID": payment_response.get('CheckoutRequestID')
+        }
+        
+    except HTTPException as e:
+        raise
     except Exception as e:
+        await db.rollback()
         logger.error(f"Error initiating payment: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Payment initiation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     
 
-
-
-
-
+# Add payment callback endpoint
 @app.post("/payment_callback", status_code=status.HTTP_200_OK)
-async def payment_callback(callback_data: Dict[str, Any], request: Request, db: db_dependency):
+async def payment_callback(request: Request, db: db_dependency):
     try:
+        # Parse the callback data
+        callback_data = await request.json()
+        logger.info(f"Payment callback received: {callback_data}")
+        
+        # Extract payment details
+        checkout_request_id = callback_data.get('Body', {}).get('stkCallback', {}).get('CheckoutRequestID')
+        result_code = callback_data.get('Body', {}).get('stkCallback', {}).get('ResultCode')
+        
+        if not checkout_request_id:
+            logger.error("No CheckoutRequestID in callback")
+            return {"message": "Invalid callback data"}
+        
+        # Find the order by payment reference
+        result = await db.execute(
+            select(models.Orders).filter(models.Orders.payment_reference == checkout_request_id)
+        )
+        order = result.scalars().first()
+        
+        if not order:
+            logger.error(f"Order not found for payment reference: {checkout_request_id}")
+            return {"message": "Order not found"}
+        
+        # Update order status based on payment result
+        if result_code == 0:  # Success
+            order.status = models.OrderStatus.PENDING
+            order.payment_status = "PAID"
+            logger.info(f"Payment successful for order {order.order_id}")
+        else:  # Failed
+            order.payment_status = "FAILED"
+            logger.info(f"Payment failed for order {order.order_id}")
+        
+        await db.commit()
+        
+        return {"message": "Callback processed successfully"}
+        
+    except Exception as e:
+        logger.error(f"Error processing payment callback: {str(e)}")
+        return {"message": "Error processing callback"}
+
+
+@app.post("/ipn/daraja/lnmo/callback", status_code=status.HTTP_200_OK)
+async def payment_callback(request: Request, db: db_dependency):
+    try:
+        # Parse the callback data
+        callback_data = await request.json()
+        logger.info(f"Payment callback received: {callback_data}")
+        
+        # Process callback with LNMORepository
         lnmo_repo = LNMORepository()
         response = await lnmo_repo.callback(callback_data, request, db)
-        return {"message": "Callback processed", "response": response}
+        
+        return {"message": "Callback processed successfully"}
+        
     except Exception as e:
-        logger.error(f"Error processing callback: {str(e)}")
-        raise HTTPException(status_code=500, detail="Callback processing failed")
+        logger.error(f"Error processing payment callback: {str(e)}")
+        return {"message": "Error processing callback"}
 
 @app.get("/check_payment_status/{order_id}", response_model=PaymentStatusResponse, status_code=status.HTTP_200_OK)
 async def check_payment_status(order_id: int, user: user_dependency, db: db_dependency):
     try:
+        # Validate order exists and belongs to the user
         result = await db.execute(
-            select(models.Transaction).filter(
-                models.Transaction.order_id == order_id,
-                models.Transaction.user_id == user.get("id")
-            ).order_by(models.Transaction.created_at.desc())
+            select(models.Orders).filter(
+                models.Orders.order_id == order_id,
+                models.Orders.user_id == user.get("id")
+            )
+        )
+        order = result.scalars().first()
+        
+        if not order:
+            logger.info(f"Order not found: ID {order_id} for user {user.get('id')}")
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Find the transaction associated with the order
+        result = await db.execute(
+            select(models.Transaction).where(models.Transaction.order_id == order_id)
         )
         transaction = result.scalars().first()
+        
         if not transaction:
+            logger.info(f"No transaction found for order {order_id}")
             raise HTTPException(status_code=404, detail="Transaction not found")
-        return PaymentStatusResponse(status=transaction._status.name)
+        
+        # Query transaction status using LNMORepository
+        lnmo_repo = LNMORepository()
+        response_data = await lnmo_repo.query(transaction.transaction_id, db)
+        result_code = response_data.get("ResultCode")
+        
+        # Map M-Pesa result codes to frontend-expected statuses
+        if result_code == "0":
+            status = "ACCEPTED"
+        elif result_code == "1032":
+            status = "CANCELED"
+        else:
+            status = "REJECTED"
+        
+        return {"status": status}
+        
+    except HTTPException as e:
+        raise
     except Exception as e:
         logger.error(f"Error checking payment status: {str(e)}")
         raise HTTPException(status_code=500, detail="Error checking payment status")
+    
 
-
-
+# Add payment status check endpoint
+@app.get("/payment_status/{order_id}", response_model=PaymentStatusResponse, status_code=status.HTTP_200_OK)
+async def check_payment_status(order_id: int, user: user_dependency, db: db_dependency):
+    try:
+        result = await db.execute(
+            select(models.Orders).filter(
+                models.Orders.order_id == order_id,
+                models.Orders.user_id == user.get("id")
+            )
+        )
+        order = result.scalars().first()
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        return {
+            "order_id": order.order_id,
+            "payment_status": getattr(order, 'payment_status', 'PENDING'),
+            "order_status": order.status.value,
+            "total_amount": float(order.total)
+        }
+        
+    except SQLAlchemyError as e:
+        logger.error(f"Error checking payment status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error checking payment status")
 
 
 if __name__ == "__main__":

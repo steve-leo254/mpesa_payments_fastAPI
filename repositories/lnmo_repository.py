@@ -4,8 +4,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import Transaction
-from models.transaction import  TransactionStatus, TransactionCategory, TransactionType, TransactionChannel, TransactionAggregator 
-from pydantic_model import OrderStatus  # Import OrderStatus
+from models.transaction import TransactionStatus, TransactionCategory, TransactionType, TransactionChannel, TransactionAggregator 
+from pydantic_model import OrderStatus
 from typing import Dict, Any
 import os
 import logging
@@ -162,6 +162,8 @@ class LNMORepository:
                         if item.get("Name") == "MpesaReceiptNumber" and "Value" in item:
                             transaction.transaction_code = item["Value"]
                             break
+            elif result_code == 1032:
+                transaction._status = TransactionStatus.CANCELED
             else:
                 transaction._status = TransactionStatus.REJECTED
             
