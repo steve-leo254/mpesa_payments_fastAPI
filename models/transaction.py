@@ -1,55 +1,58 @@
-
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, Text, JSON
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, Text, JSON, ForeignKey, Enum
 from sqlalchemy.sql import func
 from database import Base
+from sqlalchemy.orm import relationship
 from datetime import datetime
+from enum import IntEnum
 
-class Transaction(Base):
-    __tablename__ = 'transactions'
-    
-    # Define the transaction status as constants
+class TransactionStatus(IntEnum):
     PENDING = 0
     PROCESSING = 1
     PROCESSED = 2
     REJECTED = 3
     ACCEPTED = 4
 
-    # Define the transaction categories
+class TransactionCategory(IntEnum):
     PURCHASE_ORDER = 0
     PAYOUT = 1
 
-    # Define the transaction types
+class TransactionType(IntEnum):
     DEBIT = 0
     CREDIT = 1
 
-    # Define the transaction channels
+class TransactionChannel(IntEnum):
     C2B = 0
     LNMO = 1
     B2C = 2
     B2B = 3
 
-    # Define the transaction aggregator
+class TransactionAggregator(IntEnum):
     MPESA_KE = 0
     PAYPAL_USD = 1
 
-    id = Column(Integer, primary_key=True, index=True)
-    _pid = Column(String, unique=True, nullable=False, index=True)
-    party_a = Column(String, nullable=False)
-    party_b = Column(String, nullable=False)
-    account_reference = Column(String, nullable=False)
-    transaction_category = Column(Integer, nullable=False)
-    transaction_type = Column(Integer, nullable=False)
-    transaction_channel = Column(Integer, nullable=False)
-    transaction_aggregator = Column(Integer, nullable=False)
-    transaction_id = Column(String, unique=True, nullable=True, index=True)
-    transaction_amount = Column(Numeric(10, 2), nullable=False)
-    transaction_code = Column(String, unique=True, nullable=True)
-    transaction_timestamp = Column(DateTime, default=datetime.utcnow)
-    transaction_details = Column(Text, nullable=False)
-    _feedback = Column(JSON, nullable=False)
-    _status = Column(Integer, default=PENDING)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, onupdate=func.now())
-
-    def __repr__(self):
-        return f'<Transaction {self.id} - {self._pid}>'
+# class Transaction(Base):
+#     __tablename__ = 'transactions'
+    
+#     id = Column(Integer, primary_key=True, index=True)
+#     _pid = Column(String(100), unique=True, nullable=False, index=True)
+#     party_a = Column(String(100), nullable=False)
+#     party_b = Column(String(100), nullable=False)
+#     account_reference = Column(String(150), nullable=False)
+#     transaction_category = Column(Enum(TransactionCategory), nullable=False)
+#     transaction_type = Column(Enum(TransactionType), nullable=False)
+#     transaction_channel = Column(Enum(TransactionChannel), nullable=False)
+#     transaction_aggregator = Column(Enum(TransactionAggregator), nullable=False)
+#     transaction_id = Column(String(100), unique=True, nullable=True, index=True)
+#     transaction_amount = Column(Numeric(10, 2), nullable=False)
+#     transaction_code = Column(String(100), unique=True, nullable=True)
+#     transaction_timestamp = Column(DateTime, default=datetime.utcnow)
+#     transaction_details = Column(Text, nullable=False)
+#     _feedback = Column(JSON, nullable=False)
+#     _status = Column(Enum(TransactionStatus), default=TransactionStatus.PENDING)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     updated_at = Column(DateTime, onupdate=func.now)
+#     user_id = Column(Integer, ForeignKey('users.id'))
+#     order_id = Column(Integer, ForeignKey('orders.order_id'), nullable=True)
+    
+#     user = relationship("Users", back_populates="transactions")
+#     order = relationship("Orders", back_populates="transactions")

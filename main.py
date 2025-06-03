@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Query, Request
 from pydantic_model import (
     ProductsBase, CartPayload, CartItem, UpdateProduct, CategoryBase, CategoryResponse,
     ProductResponse, OrderResponse, OrderDetailResponse, Role, PaginatedProductResponse,
@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from repositories.lnmo_repository import LNMORepository
+
 from contextlib import asynccontextmanager
 
 load_dotenv()
@@ -635,7 +636,7 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
             "Amount": float(order.total),
             "PhoneNumber": request.phone_number,
             "AccountReference": str(request.order_id),
-            "pid": str(uuid.uuid4()),  # Unique transaction PID
+            "pid": str(uuid.uuid4()),
             "order_id": request.order_id,
             "user_id": user.get("id")
         }
@@ -648,12 +649,11 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
         logger.error(f"Error initiating payment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Payment initiation failed: {str(e)}")
 
-
 @app.post("/payment_callback", status_code=status.HTTP_200_OK)
-async def payment_callback(callback_data: Dict[str, Any], db: db_dependency):
+async def payment_callback(callback_data: Dict[str, Any], request: Request, db: db_dependency):
     try:
         lnmo_repo = LNMORepository()
-        response = await lnmo_repo.callback(callback_data, db)
+        response = await lnmo_repo.callback(callback_data, request, db)
         return {"message": "Callback processed", "response": response}
     except Exception as e:
         logger.error(f"Error processing callback: {str(e)}")
@@ -675,6 +675,8 @@ async def check_payment_status(order_id: int, user: user_dependency, db: db_depe
     except Exception as e:
         logger.error(f"Error checking payment status: {str(e)}")
         raise HTTPException(status_code=500, detail="Error checking payment status")
+
+
 
 
 

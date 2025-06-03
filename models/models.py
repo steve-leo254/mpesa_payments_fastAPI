@@ -1,3 +1,4 @@
+#models
 from sqlalchemy import Column, Integer, String, func, DateTime, Numeric, ForeignKey, Enum, Boolean, Text
 from database import Base
 from sqlalchemy.orm import relationship
