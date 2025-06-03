@@ -7,11 +7,11 @@ from datetime import datetime
 from sqlalchemy.dialects.mysql import JSON
 
 class TransactionStatus(enum.Enum):
-    PENDING = 0
-    PROCESSING = 1
-    PROCESSED = 2
-    REJECTED = 3
-    ACCEPTED = 4
+  PENDING = "PENDING"
+  PROCESSING = "PROCESSING"
+  PROCESSED = "PROCESSED"
+  REJECTED = "REJECTED"
+  ACCEPTED = "ACCEPTED"
 
 class Role(enum.Enum):
     ADMIN = "admin"
@@ -108,6 +108,7 @@ class Address(Base):
     
     user = relationship("Users", back_populates="addresses")
     orders = relationship("Orders", back_populates="address") 
+
 
 class Transaction(Base):
     __tablename__ = 'transactions'

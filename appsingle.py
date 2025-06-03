@@ -17,7 +17,7 @@ class LNMORepository:
     MPESA_LNMO_ENVIRONMENT = os.getenv("MPESA_LNMO_ENVIRONMENT", "sandbox")
     MPESA_LNMO_PASS_KEY = os.getenv("MPESA_LNMO_PASS_KEY")
     MPESA_LNMO_SHORT_CODE = os.getenv("MPESA_LNMO_SHORT_CODE", "174379")
-    MPESA_LNMO_CALLBACK_URL = os.getenv("MPESA_LNMO_CALLBACK_URL")
+    MPESA_LNMO_CALLBACK_URL = os.getenv("MPESA_LNMO_CALLBACK_URL","https://d270-197-237-26-50.ngrok-free.app/ipn/daraja/lnmo/callback")
     MPESA_IPS = ["196.201.214.0/24"]  # Update with Safaricom IPs
 
     def __init__(self):

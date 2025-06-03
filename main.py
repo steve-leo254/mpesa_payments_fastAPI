@@ -561,6 +561,7 @@ async def fetch_all_orders(
         logger.error(f"Error fetching all orders: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching orders")
 
+
 @app.put("/update-order-status/{order_id}", status_code=status.HTTP_200_OK)
 async def update_order_status(
     order_id: int,
@@ -611,6 +612,100 @@ async def update_order_status(
         await db.rollback()
         logger.error(f"Unexpected error updating order status for order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error updating order status")
+
+
+@app.post("/create_order", status_code=status.HTTP_201_CREATED)
+async def create_order(db: db_dependency, user: user_dependency, order_payload: CartPayload):
+    logger.info(f"Starting order creation for user {user.get('id')}")
+    try:
+        # Validate address
+        logger.info(f"Validating address ID {order_payload.address_id}")
+        address_id = order_payload.address_id
+        if address_id:
+            stmt = select(models.Address).filter(
+                models.Address.id == address_id,
+                models.Address.user_id == user.get("id")
+            )
+            logger.info("Executing address query")
+            result = await db.execute(stmt)
+            address = result.scalars().first()
+            if not address:
+                logger.info(f"Invalid address ID {address_id}")
+                raise HTTPException(status_code=400, detail="Invalid address ID")
+
+        # Create order
+        logger.info("Creating new order")
+        delivery_fee = Decimal(str(order_payload.delivery_fee))
+        new_order = models.Orders(
+            user_id=user.get("id"),
+            total=Decimal('0'),
+            address_id=address_id,
+            delivery_fee=delivery_fee
+        )
+        logger.info("Adding new order to session")
+        db.add(new_order)
+        logger.info("Committing new order")
+        await db.commit()
+        logger.info("Refreshing new order")
+        await db.refresh(new_order)
+
+        # Process cart items
+        logger.info("Processing cart items")
+        total_cost = Decimal('0')
+        for item in order_payload.cart:
+            logger.info(f"Fetching product ID {item.id}")
+            stmt = select(models.Products).filter_by(id=item.id)
+            logger.info(f"Executing product query for ID {item.id}")
+            result = await db.execute(stmt)
+            logger.info(f"Retrieving product for ID {item.id}")
+            product = result.scalars().first()
+            if not product:
+                logger.info(f"Product ID {item.id} not found")
+                await db.rollback()
+                raise HTTPException(status_code=404, detail=f"Product ID {item.id} not found")
+            
+            logger.info(f"Validating stock for product {product.name}")
+            quantity = Decimal(str(item.quantity))
+            if product.stock_quantity < quantity:
+                logger.info(f"Insufficient stock for product {product.name}")
+                await db.rollback()
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for product {product.name}")
+
+            logger.info(f"Creating order detail for product {product.name}")
+            order_detail = models.OrderDetails(
+                order_id=new_order.order_id,
+                product_id=product.id,
+                quantity=quantity,
+                total_price=product.price * quantity,
+            )
+            logger.info(f"Updating stock quantity for product {product.name}")
+            product.stock_quantity -= quantity
+            logger.info(f"Adding order detail to session")
+            db.add(order_detail)
+
+        logger.info("Updating order total")
+        new_order.total = total_cost + new_order.delivery_fee
+        logger.info("Committing final order")
+        await db.commit()
+
+        logger.info(f"Order {new_order.order_id} created for user {user.get('id')}")
+        return {
+            "message": "Order created successfully",
+            "order_id": new_order.order_id,
+        }
+    except SQLAlchemyError as e:
+        await db.rollback()
+        logger.error(f"SQLAlchemy error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        await db.rollback()
+        logger.error(f"ValueError creating order: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid quantity value")
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Unexpected error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 
 @app.post("/initiate_payment", status_code=status.HTTP_200_OK)
@@ -664,7 +759,10 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
         logger.error(f"Error initiating payment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Payment initiation failed: {str(e)}")
     
-    
+
+
+
+
 
 @app.post("/payment_callback", status_code=status.HTTP_200_OK)
 async def payment_callback(callback_data: Dict[str, Any], request: Request, db: db_dependency):
