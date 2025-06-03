@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models.transaction import  TransactionStatus, TransactionCategory, TransactionType, TransactionChannel, TransactionAggregator
+from pydantic_model import OrderStatus  # Import OrderStatus
 from typing import Dict, Any
 import os
 import logging
@@ -17,8 +18,8 @@ class LNMORepository:
     MPESA_LNMO_ENVIRONMENT = os.getenv("MPESA_LNMO_ENVIRONMENT", "sandbox")
     MPESA_LNMO_PASS_KEY = os.getenv("MPESA_LNMO_PASS_KEY")
     MPESA_LNMO_SHORT_CODE = os.getenv("MPESA_LNMO_SHORT_CODE", "174379")
-    MPESA_LNMO_CALLBACK_URL = os.getenv("MPESA_LNMO_CALLBACK_URL")
-    MPESA_IPS = ["196.201.214.0/24"]  # Update with Safaricom IPs
+    MPESA_LNMO_CALLBACK_URL = os.getenv("MPESA_CALLBACK_URL","https://d270-197-237-26-50.ngrok-free.app/ipn/daraja/lnmo/callback")
+    MPESA_IPS = ["196.201.214.0/24", "196.201.214.200"]  # Safaricom callback IPs
 
     def __init__(self):
         required_vars = [
@@ -40,6 +41,9 @@ class LNMORepository:
 
     async def transact(self, data: Dict[str, Any], db: AsyncSession) -> Dict[str, Any]:
         try:
+            # Ensure amount is integer
+            amount = int(float(data["Amount"]))  # Convert to int to remove decimals
+            
             endpoint = f"https://{self.MPESA_LNMO_ENVIRONMENT}.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
             headers = {
                 "Authorization": f"Bearer {self.generate_access_token()}",
@@ -51,7 +55,7 @@ class LNMORepository:
                 "Password": self.generate_password(timestamp),
                 "Timestamp": timestamp,
                 "TransactionType": "CustomerPayBillOnline",
-                "Amount": str(data["Amount"]),
+                "Amount": amount,  # Use integer directly, not string
                 "PartyA": data["PhoneNumber"],
                 "PartyB": self.MPESA_LNMO_SHORT_CODE,
                 "PhoneNumber": data["PhoneNumber"],
@@ -59,16 +63,19 @@ class LNMORepository:
                 "AccountReference": data["AccountReference"],
                 "TransactionDesc": f"Payment for order {data['AccountReference']}",
             }
+            
             response = requests.post(endpoint, json=payload, headers=headers)
             logger.info(f"STK Push request: endpoint={endpoint}, payload={payload}")
             logger.info(f"STK Push response: status={response.status_code}, text={response.text}")
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
+            
             response_data = response.json()
             if "errorCode" in response_data:
                 raise Exception(f"M-Pesa API error: {response_data.get('errorMessage')}")
 
+            # Create transaction record
             transaction = Transaction(
                 _pid=data.get("pid", data["AccountReference"]),
                 party_a=data["PhoneNumber"],
@@ -79,7 +86,7 @@ class LNMORepository:
                 transaction_channel=TransactionChannel.LNMO,
                 transaction_aggregator=TransactionAggregator.MPESA_KE,
                 transaction_id=response_data.get("CheckoutRequestID"),
-                transaction_amount=data["Amount"],
+                transaction_amount=amount,  # Store the integer amount
                 transaction_code=None,
                 transaction_timestamp=datetime.now(),
                 transaction_details=f"Payment for order {data['AccountReference']}",
@@ -88,11 +95,13 @@ class LNMORepository:
                 order_id=data.get("order_id"),
                 user_id=data.get("user_id")
             )
+            
             db.add(transaction)
             await db.commit()
             await db.refresh(transaction)
             logger.info(f"Transaction saved: ID={transaction.transaction_id}")
             return response_data
+            
         except Exception as e:
             logger.error(f"Error initiating M-Pesa transaction: {str(e)}")
             raise
@@ -120,7 +129,8 @@ class LNMORepository:
             raise
 
     async def callback(self, data: Dict[str, Any], request: Request, db: AsyncSession) -> Dict[str, Any]:
-        if not self.verify_callback(request):
+        # Skip IP verification in development/sandbox mode
+        if self.MPESA_LNMO_ENVIRONMENT == "production" and not self.verify_callback(request):
             logger.error(f"Invalid callback source: {request.client.host}")
             raise HTTPException(status_code=403, detail="Invalid callback source")
         
@@ -136,10 +146,14 @@ class LNMORepository:
             
             transaction._feedback = data
             result_code = data["Body"]["stkCallback"]["ResultCode"]
+            
             if result_code == 0:
                 transaction._status = TransactionStatus.ACCEPTED
-                if transaction.order:
-                    transaction.order.status = OrderStatus.PROCESSING
+                # Update order status if order exists
+                if hasattr(transaction, 'order') and transaction.order:
+                    transaction.order.status = OrderStatus.DELIVERED  # or PROCESSING based on your workflow
+                
+                # Extract M-Pesa receipt number
                 callback_metadata = data["Body"]["stkCallback"].get("CallbackMetadata")
                 if callback_metadata:
                     items = callback_metadata.get("Item", [])
@@ -152,14 +166,26 @@ class LNMORepository:
             
             await db.commit()
             await db.refresh(transaction)
-            logger.info(f"Callback processed for transaction {checkout_request_id}")
+            logger.info(f"Callback processed for transaction {checkout_request_id}, status: {transaction._status}")
             return data
+            
         except Exception as e:
             logger.error(f"Error processing M-Pesa callback: {str(e)}")
             raise
 
     def verify_callback(self, request: Request) -> bool:
-        return request.client.host in self.MPESA_IPS
+        """Verify that the callback is coming from a valid M-Pesa IP"""
+        client_ip = request.client.host
+        # In production, you should implement proper IP range checking
+        # For now, we'll allow any IP in sandbox mode
+        if self.MPESA_LNMO_ENVIRONMENT == "sandbox":
+            return True
+        
+        # Check if client IP is in allowed M-Pesa IP ranges
+        for allowed_ip in self.MPESA_IPS:
+            if client_ip.startswith(allowed_ip.split('/')[0]):
+                return True
+        return False
 
     def generate_access_token(self) -> str:
         try:
@@ -167,21 +193,29 @@ class LNMORepository:
             credentials = f"{self.MPESA_LNMO_CONSUMER_KEY}:{self.MPESA_LNMO_CONSUMER_SECRET}"
             encoded_credentials = base64.b64encode(credentials.encode()).decode()
             headers = {"Authorization": f"Basic {encoded_credentials}"}
+            
             response = requests.get(endpoint, headers=headers, timeout=10)
-            logger.info(f"Access token response: status={response.status_code}, text={response.text}")
+            logger.info(f"Access token response: status={response.status_code}")
+            
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
+                
             response_data = response.json()
-            return response_data.get("access_token")
+            access_token = response_data.get("access_token")
+            
+            if not access_token:
+                raise Exception("Access token not found in response")
+                
+            return access_token
+            
         except Exception as e:
             logger.error(f"Error generating access token: {str(e)}")
             raise
 
     def generate_password(self, timestamp: str) -> str:
         try:
-            password = base64.b64encode(
-                f"{self.MPESA_LNMO_SHORT_CODE}{self.MPESA_LNMO_PASS_KEY}{timestamp}".encode()
-            ).decode()
+            password_string = f"{self.MPESA_LNMO_SHORT_CODE}{self.MPESA_LNMO_PASS_KEY}{timestamp}"
+            password = base64.b64encode(password_string.encode()).decode()
             return password
         except Exception as e:
             logger.error(f"Error generating password: {str(e)}")

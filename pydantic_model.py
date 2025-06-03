@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr,Field
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from enum import Enum
@@ -160,6 +160,7 @@ class PaginatedOrderResponse(BaseModel):
 class InitiatePaymentRequest(BaseModel):
     order_id: int
     phone_number: str
+    amount : float = Field(..., gt=0, description="Amount must be greater than 0")
 
 class PaymentStatusResponse(BaseModel):
     status: str

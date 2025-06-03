@@ -612,9 +612,20 @@ async def update_order_status(
         logger.error(f"Unexpected error updating order status for order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error updating order status")
 
+
 @app.post("/initiate_payment", status_code=status.HTTP_200_OK)
 async def initiate_payment(request: InitiatePaymentRequest, user: user_dependency, db: db_dependency):
     try:
+        # Validate amount early
+        if request.amount != int(request.amount):
+            raise HTTPException(status_code=400, detail="Amount must be a whole number")
+        
+        amount_int = int(request.amount)
+        if amount_int < 1:
+            raise HTTPException(status_code=400, detail="Amount must be at least 1 KES")
+        if amount_int > 70000:
+            raise HTTPException(status_code=400, detail="Amount cannot exceed 70,000 KES")
+
         result = await db.execute(
             select(models.Orders).filter(
                 models.Orders.order_id == request.order_id,
@@ -625,6 +636,10 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # Verify amount matches order total
+        if amount_int != int(order.total):
+            raise HTTPException(status_code=400, detail="Amount does not match order total")
+
         result = await db.execute(
             select(models.Transaction).filter(models.Transaction.order_id == request.order_id)
         )
@@ -633,7 +648,7 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
             raise HTTPException(status_code=400, detail="Payment already accepted")
 
         data = {
-            "Amount": float(order.total),
+            "Amount": amount_int,  # Use integer directly
             "PhoneNumber": request.phone_number,
             "AccountReference": str(request.order_id),
             "pid": str(uuid.uuid4()),
@@ -648,6 +663,8 @@ async def initiate_payment(request: InitiatePaymentRequest, user: user_dependenc
     except Exception as e:
         logger.error(f"Error initiating payment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Payment initiation failed: {str(e)}")
+    
+    
 
 @app.post("/payment_callback", status_code=status.HTTP_200_OK)
 async def payment_callback(callback_data: Dict[str, Any], request: Request, db: db_dependency):
