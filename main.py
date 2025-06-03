@@ -3,7 +3,7 @@ from pydantic_model import (
     ProductsBase, CartPayload, CartItem, UpdateProduct, CategoryBase, CategoryResponse,
     ProductResponse, OrderResponse, OrderDetailResponse, Role, PaginatedProductResponse,
     ImageResponse, AddressCreate, AddressResponse, PaginatedOrderResponse, OrderStatus,
-    InitiatePaymentRequest, PaymentStatusResponse, PaginatedOrderWithUserResponse, UpdateOrderStatusRequest
+    InitiatePaymentRequest, PaymentStatusResponse, PaginatedOrderWithUserResponse, UpdateOrderStatusRequest,TransactionStatus
 )
 from typing import Annotated, List, Optional, Dict, Any
 import models
@@ -692,17 +692,34 @@ async def initiate_payment(
             logger.info(f"Amount mismatch for order {request.order_id}: {request.amount} vs {order.total}")
             raise HTTPException(status_code=400, detail="Invalid payment amount")
         
+        # Check for existing transactions
+        result = await db.execute(
+            select(models.Transaction).where(
+                models.Transaction.order_id == request.order_id,
+                models.Transaction._status.in_([TransactionStatus.PENDING, TransactionStatus.ACCEPTED])
+            )
+        )
+        existing_transaction = result.scalars().first()
+        
+        if existing_transaction:
+            logger.info(f"Existing transaction found for order {request.order_id}: {existing_transaction.transaction_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Payment already initiated for this order. Transaction ID: {existing_transaction.transaction_id}"
+            )
+        
         # Initialize LNMO repository
         lnmo_repo = LNMORepository()
         
-        # Prepare data for transact
+        # Prepare data for transact with unique _pid
+        unique_pid = f"ORDER-{request.order_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         transact_data = {
             "Amount": request.amount,
             "PhoneNumber": request.phone_number,
             "AccountReference": f"ORDER-{request.order_id}",
             "order_id": request.order_id,
             "user_id": user.get("id"),
-            "pid": f"ORDER-{request.order_id}"
+            "pid": unique_pid
         }
         
         # Initiate payment with M-Pesa
