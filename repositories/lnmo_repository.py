@@ -3,7 +3,8 @@ import requests
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from models.transaction import  TransactionStatus, TransactionCategory, TransactionType, TransactionChannel, TransactionAggregator
+from models import Transaction
+from models.transaction import  TransactionStatus, TransactionCategory, TransactionType, TransactionChannel, TransactionAggregator 
 from pydantic_model import OrderStatus  # Import OrderStatus
 from typing import Dict, Any
 import os
